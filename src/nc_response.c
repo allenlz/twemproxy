@@ -299,6 +299,78 @@ rsp_recv_done(struct context *ctx, struct conn *conn, struct msg *msg,
     rsp_forward(ctx, conn, msg);
 }
 
+static bool
+req_error_repairable(struct conn *conn, struct msg *msg)
+{
+    ASSERT(conn->client && !conn->proxy);
+    ASSERT(msg->request);
+    ASSERT(msg->owner == conn);
+
+    /* TODO COMMENT */
+    if (msg->redis || msg->frag_id == 0) {
+        log_info("aaaaaaaaaaaaaaaaaaaaa");
+        return false;
+    }
+
+    ASSERT(msg->first_fragment && msg->frag_owner && msg->frag_owner == msg);
+    /* TODO COMMENT */
+    if (msg->nfrag_error >= msg->nfrag) {
+        return false;
+    }
+
+    return true;
+}
+
+/* TODO COMMENT */
+static struct msg *
+req_error_repair(struct context *ctx, struct conn *conn, struct msg *msg)
+{
+    //struct msg *pmsg;        /* peer message (response) */
+    struct msg *cmsg, *nmsg; /* current and next message (request) */
+    struct msg *rmsg;        /* the first message with correct response */
+    uint64_t id;
+    //err_t err;
+
+    rmsg = NULL;
+    id = msg->frag_id;
+    for (/*err = 0, */cmsg = msg;
+         cmsg != NULL && cmsg->frag_id == id;
+         cmsg = nmsg) {
+        nmsg = TAILQ_NEXT(cmsg, c_tqe);
+
+        if (cmsg->error != 0) {
+            log_info("EEEEEEEEEEEEEEEEEEEEEEEEEEE");
+            msg_dump(cmsg);
+            if (cmsg->peer) {
+                msg_dump(cmsg->peer);
+            }
+        } else {
+            log_info("NNNNNNNNNNNNNNNNNNNNNNNNNNN");
+            msg_dump(cmsg);
+            if (cmsg->peer) {
+                msg_dump(cmsg->peer);
+            }
+        }
+
+        if (cmsg->error == 0) {
+            if (rmsg == NULL) {
+                rmsg = cmsg;
+            }
+        } else {
+            /* dequeue request (error fragment) from client outq */
+            conn->dequeue_outq(ctx, conn, cmsg);
+            /*if (err == 0 && cmsg->err != 0) {*/
+                /*err = cmsg->err;*/
+            /*}*/
+
+            req_put(cmsg);
+        }
+    }
+
+    ASSERT(rmsg != NULL && rmsg->peer != NULL);
+    return rmsg;
+}
+
 struct msg *
 rsp_send_next(struct context *ctx, struct conn *conn)
 {
@@ -337,17 +409,23 @@ rsp_send_next(struct context *ctx, struct conn *conn)
     ASSERT(pmsg->request && !pmsg->swallow);
 
     if (req_error(conn, pmsg)) {
-        msg = rsp_make_error(ctx, conn, pmsg);
-        if (msg == NULL) {
-            conn->err = errno;
-            return NULL;
+        // TODO comments
+        if (!req_error_repairable(conn, pmsg)) {
+            msg = rsp_make_error(ctx, conn, pmsg);
+            if (msg == NULL) {
+                conn->err = errno;
+                return NULL;
+            }
+            msg->peer = pmsg;
+            pmsg->peer = msg;
+            stats_pool_incr(ctx, conn->owner, forward_error);
+            
+            // print request and response info into access log
+            rsp_forward_log(pmsg, msg);
+        } else {
+            msg = req_error_repair(ctx, conn, pmsg);
+            msg = msg->peer;
         }
-        msg->peer = pmsg;
-        pmsg->peer = msg;
-        stats_pool_incr(ctx, conn->owner, forward_error);
-        
-        // print request and response info into access log
-        rsp_forward_log(pmsg, msg);
     } else {
         msg = pmsg->peer;
     }
